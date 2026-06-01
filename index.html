@@ -1,0 +1,724 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>형진의 자격증 플래너</title>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;800&display=swap" rel="stylesheet"/>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0D1117; }
+    textarea:focus { border-color: #58A6FF !important; }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #0D1117; }
+    ::-webkit-scrollbar-thumb { background: #21262D; border-radius: 3px; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+
+<!-- ★★★ Firebase 설정: 아래 값을 Firebase 콘솔에서 복사한 값으로 교체하세요 ★★★ -->
+<script>
+  const firebaseConfig = {
+    apiKey:            "AIzaSyALPXchQjFPnef8RPDCA0BSKMnJ5dh2vVA",
+    authDomain:        "studyplan-6d3ac.firebaseapp.com",
+    projectId:         "studyplan-6d3ac",
+    storageBucket:     "studyplan-6d3ac.firebasestorage.app",
+    messagingSenderId: "76851932451",
+    appId:             "1:76851932451:web:45e91b648bad2473adb096"
+  };
+  const IS_CONFIGURED = !firebaseConfig.apiKey.startsWith("REPLACE");
+  if (IS_CONFIGURED) firebase.initializeApp(firebaseConfig);
+</script>
+
+<script type="text/babel">
+const { useState, useEffect, useMemo, useRef } = React;
+
+/* ── FIRESTORE STORAGE ADAPTER ── */
+function makeStorage(uid) {
+  const db = firebase.firestore();
+  return {
+    list: async () => {
+      const snap = await db.collection(`users/${uid}/days`).get();
+      return { keys: snap.docs.map(d => `hyeongjin:${d.id}`) };
+    },
+    get: async (key) => {
+      const k = key.replace("hyeongjin:", "");
+      if (k.startsWith("memo:")) {
+        const doc = await db.collection(`users/${uid}/memos`).doc(k.replace("memo:","")).get();
+        return doc.exists ? { value: doc.data().text } : null;
+      } else {
+        const doc = await db.collection(`users/${uid}/days`).doc(k).get();
+        return doc.exists ? { value: JSON.stringify(doc.data()) } : null;
+      }
+    },
+    set: async (key, value) => {
+      const k = key.replace("hyeongjin:", "");
+      if (k.startsWith("memo:")) {
+        await db.collection(`users/${uid}/memos`).doc(k.replace("memo:","")).set({ text: value });
+      } else {
+        await db.collection(`users/${uid}/days`).doc(k).set(JSON.parse(value));
+      }
+    },
+  };
+}
+
+/* ── CONSTANTS ── */
+const todayDate = new Date();
+const todayStr  = todayDate.toISOString().split("T")[0];
+const DAY_NAMES = ["일","월","화","수","목","금","토"];
+
+const WEEKDAY_TASKS = [
+  { id:"vocab",     label:"토익 단어 20개 암기",              cat:"toeic"  },
+  { id:"grammar",   label:"서아쌤 영문법 1강 시청",            cat:"toeic"  },
+  { id:"sj_lec",    label:"유선배 강의 2강 수강",              cat:"sajobn" },
+  { id:"sj_note",   label:"강의 노트 정리 (A4 반 페이지)",     cat:"sajobn" },
+  { id:"aice_lec",  label:"AICE 강의 1강 수강",               cat:"aice"   },
+  { id:"aice_code", label:"AICE 실습 코드 직접 실행",          cat:"aice"   },
+];
+const WEEKEND_TASKS = [
+  { id:"vocab",       label:"토익 단어 20개 암기",                  cat:"toeic"  },
+  { id:"toeic_mock",  label:"토익 모의문제 파트 1개 풀기",           cat:"toeic"  },
+  { id:"sj_quiz",     label:"사조분 기출 20문항 풀기",               cat:"sajobn" },
+  { id:"aice_review", label:"AICE 실습 처음부터 혼자 다시 짜보기",   cat:"aice"   },
+];
+
+const MILESTONES = [
+  { date:"2026-07-20", label:"사조분 3회차 원서접수", short:"원서접수",  color:"#F59E0B" },
+  { date:"2026-08-20", label:"AICE Associate 시험",  short:"AICE",      color:"#A78BFA" },
+  { date:"2026-09-13", label:"사조분 필기시험",        short:"사조분필기", color:"#F87171" },
+  { date:"2026-09-27", label:"토익 시험",             short:"토익",      color:"#60A5FA" },
+  { date:"2026-11-08", label:"사조분 실기시험",        short:"사조분실기", color:"#F472B6" },
+];
+const PHASES = {
+  6:  { label:"기초 구축기",   desc:"조방I · 영문법 기초 · AICE 시작" },
+  7:  { label:"본격 심화기",   desc:"조방II · 사회통계 · LC · 원서접수 ⚠️" },
+  8:  { label:"실전 집중기",   desc:"사조분 총복습 · RC · AICE 시험 응시" },
+  9:  { label:"시험 시즌 🔥",  desc:"사조분 필기 · 토익 시험 응시" },
+  10: { label:"마무리",        desc:"SPSS 실기 준비 · 토익 재응시" },
+  11: { label:"사조분 실기",   desc:"실기 시험 최종 준비" },
+};
+const CAT_META = {
+  toeic:  { label:"토익",  accent:"#60A5FA" },
+  sajobn: { label:"사조분", accent:"#34D399" },
+  aice:   { label:"AICE",  accent:"#FBBF24" },
+};
+
+/* ── HELPERS ── */
+const isWE      = (d) => [0,6].includes(d instanceof Date ? d.getDay() : new Date(d).getDay());
+const getTasks  = (d) => isWE(d) ? WEEKEND_TASKS : WEEKDAY_TASKS;
+const getDIM    = (y,m) => new Date(y,m+1,0).getDate();
+const getFirst  = (y,m) => new Date(y,m,1).getDay();
+const daysUntil = (ds) => Math.ceil((new Date(ds)-new Date(todayStr))/86400000);
+const fmtDate   = (ds) => new Date(ds).toLocaleDateString("ko-KR",{month:"long",day:"numeric"});
+const padDate   = (y,m,d) => `${y}-${String(m+1).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+
+function calcStreak(days) {
+  let n = 0, d = new Date(todayStr);
+  const todayData = days[todayStr];
+  const todayFull = todayData && getTasks(d).every(t => todayData[t.id]);
+  if (!todayFull) d.setDate(d.getDate()-1);
+  for (let i=0;i<365;i++) {
+    const ds = d.toISOString().split("T")[0];
+    const data = days[ds];
+    if (!data) break;
+    if (getTasks(d).every(t => data[t.id])) { n++; d.setDate(d.getDate()-1); }
+    else break;
+  }
+  return { streak:n, todayFull };
+}
+
+/* ── SCREENS ── */
+const C = { bg:"#0D1117", surface:"#161B22", border:"#21262D", muted:"#6E7681", text:"#E6EDF3", sub:"#C9D1D9", blue:"#58A6FF", green:"#3FB950", amber:"#FBBF24" };
+
+function LoadingScreen({ label }) {
+  return (
+    <div style={{background:C.bg,minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Noto Sans KR',sans-serif"}}>
+      <p style={{color:C.muted,fontSize:14}}>{label||"불러오는 중…"}</p>
+    </div>
+  );
+}
+
+function SetupGuide() {
+  return (
+    <div style={{background:C.bg,minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",padding:24,fontFamily:"'Noto Sans KR',sans-serif"}}>
+      <div style={{maxWidth:480,width:"100%"}}>
+        <div style={{fontSize:48,marginBottom:12,textAlign:"center"}}>📚</div>
+        <h1 style={{color:C.text,fontSize:22,fontWeight:800,marginBottom:6,textAlign:"center"}}>형진의 자격증 플래너</h1>
+        <p style={{color:C.muted,fontSize:13,marginBottom:24,textAlign:"center"}}>웹 버전을 사용하려면 Firebase 설정이 필요합니다</p>
+
+        <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:12,padding:20,marginBottom:14}}>
+          <p style={{color:C.amber,fontWeight:700,fontSize:14,marginBottom:14}}>⚙️ 설정 방법 (5분 소요)</p>
+          {[
+            ["1", "console.firebase.google.com 접속 후 새 프로젝트 만들기"],
+            ["2", "좌측 메뉴 Authentication → 시작하기 → Google 제공업체 사용"],
+            ["3", "좌측 메뉴 Firestore Database → 데이터베이스 만들기 → 테스트 모드"],
+            ["4", "프로젝트 설정(⚙️) → 내 앱 → 웹 앱 추가(</>) → firebaseConfig 복사"],
+            ["5", "이 HTML 파일을 메모장으로 열어 firebaseConfig 값 붙여넣기 후 저장"],
+          ].map(([n,t])=>(
+            <div key={n} style={{display:"flex",gap:10,marginBottom:10,alignItems:"flex-start"}}>
+              <span style={{background:C.blue,color:"#0D1117",borderRadius:"50%",width:20,height:20,display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:800,flexShrink:0,marginTop:1}}>{n}</span>
+              <span style={{color:C.text,fontSize:13,lineHeight:1.6}}>{t}</span>
+            </div>
+          ))}
+        </div>
+
+        <div style={{background:"#0A1F15",border:`1px solid ${C.green}33`,borderRadius:12,padding:16,marginBottom:14}}>
+          <p style={{color:C.green,fontWeight:700,fontSize:12,marginBottom:4}}>💡 완전 무료</p>
+          <p style={{color:C.muted,fontSize:12,lineHeight:1.7}}>
+            Firebase 무료 플랜(Spark)으로 충분합니다.<br/>
+            Firestore 무료 한도: 저장 1GB · 읽기 5만/일 · 쓰기 2만/일
+          </p>
+        </div>
+
+        <div style={{background:"#0D1B2A",border:`1px solid ${C.blue}33`,borderRadius:12,padding:16}}>
+          <p style={{color:C.blue,fontWeight:700,fontSize:12,marginBottom:4}}>🔒 보안 규칙 (Firestore → 규칙 탭에 붙여넣기)</p>
+          <pre style={{color:"#A5D6FF",fontSize:11,lineHeight:1.6,whiteSpace:"pre-wrap"}}>{`rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{userId}/{document=**} {
+      allow read, write: if request.auth != null
+        && request.auth.uid == userId;
+    }
+  }
+}`}</pre>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LoginScreen() {
+  const [loading, setLoading] = useState(false);
+  const [error,   setError]   = useState("");
+
+  const signIn = async () => {
+    setLoading(true); setError("");
+    try {
+      const provider = new firebase.auth.GoogleAuthProvider();
+      await firebase.auth().signInWithPopup(provider);
+    } catch(e) {
+      setError(e.code === "auth/popup-closed-by-user" ? "로그인 창이 닫혔어요. 다시 시도해주세요." : "로그인 실패: " + e.message);
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div style={{background:C.bg,minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",padding:24,fontFamily:"'Noto Sans KR',sans-serif"}}>
+      <div style={{maxWidth:340,width:"100%",textAlign:"center"}}>
+        <div style={{fontSize:52,marginBottom:16}}>📚</div>
+        <h1 style={{color:C.text,fontSize:22,fontWeight:800,marginBottom:6}}>형진의 자격증 플래너</h1>
+        <p style={{color:C.muted,fontSize:13,marginBottom:10}}>Google 계정으로 로그인하면</p>
+        <p style={{color:C.muted,fontSize:13,marginBottom:32}}>PC · 폰 어디서든 체크 기록이 동기화됩니다</p>
+
+        <button onClick={signIn} disabled={loading} style={{
+          display:"flex",alignItems:"center",justifyContent:"center",gap:10,
+          width:"100%",padding:"15px 20px",borderRadius:10,
+          border:`1px solid ${C.border}`,background:C.surface,
+          color:C.text,fontSize:15,fontWeight:700,cursor:loading?"not-allowed":"pointer",
+          fontFamily:"inherit",transition:"background 0.15s",
+          opacity:loading?0.6:1,
+        }}>
+          {loading ? "로그인 중…" : (
+            <>
+              <svg width="18" height="18" viewBox="0 0 18 18">
+                <path d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.874 2.684-6.615z" fill="#4285F4"/>
+                <path d="M9 18c2.43 0 4.467-.806 5.956-2.184l-2.908-2.258c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332C2.438 15.983 5.482 18 9 18z" fill="#34A853"/>
+                <path d="M3.964 10.707c-.18-.54-.282-1.117-.282-1.707s.102-1.167.282-1.707V4.961H.957C.347 6.175 0 7.55 0 9s.348 2.825.957 4.039l3.007-2.332z" fill="#FBBC05"/>
+                <path d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0 5.482 0 2.438 2.017.957 4.961L3.964 7.293C4.672 5.166 6.656 3.58 9 3.58z" fill="#EA4335"/>
+              </svg>
+              Google로 로그인
+            </>
+          )}
+        </button>
+        {error && <p style={{color:"#F87171",fontSize:12,marginTop:12}}>{error}</p>}
+      </div>
+    </div>
+  );
+}
+
+/* ── STUDY PLANNER ── */
+function StudyPlanner({ user }) {
+  const storage = useMemo(() => makeStorage(user.uid), [user.uid]);
+
+  const [tab,             setTab]             = useState("today");
+  const [checked,         setChecked]         = useState({});
+  const [tomorrowChecked, setTomorrowChecked] = useState({});
+  const [allDays,         setAllDays]         = useState({});
+  const [memo,            setMemo]            = useState("");
+  const [tomorrowMemo,    setTomorrowMemo]    = useState("");
+  const [viewOffset,      setViewOffset]      = useState(0);
+  const [calYear,         setCalYear]         = useState(todayDate.getFullYear());
+  const [calMonth,        setCalMonth]        = useState(todayDate.getMonth());
+  const [loaded,          setLoaded]          = useState(false);
+  const [syncing,         setSyncing]         = useState(false);
+  const memoTimer = useRef(null);
+
+  const tomorrowDate = new Date(todayDate); tomorrowDate.setDate(tomorrowDate.getDate()+1);
+  const tomorrowStr  = tomorrowDate.toISOString().split("T")[0];
+  const viewDateStr  = viewOffset === 0 ? todayStr : tomorrowStr;
+  const viewDate     = viewOffset === 0 ? todayDate : tomorrowDate;
+  const viewChecked  = viewOffset === 0 ? checked : tomorrowChecked;
+  const viewMemoVal  = viewOffset === 0 ? memo : tomorrowMemo;
+
+  const isWeekend = isWE(viewDate);
+  const tasks     = isWeekend ? WEEKEND_TASKS : WEEKDAY_TASKS;
+  const done      = tasks.filter(t=>viewChecked[t.id]).length;
+  const todayPct  = Math.round((done/tasks.length)*100);
+  const phase     = PHASES[viewDate.getMonth()+1] || PHASES[6];
+
+  useEffect(()=>{
+    (async()=>{
+      const days = {};
+      try {
+        const list = await storage.list();
+        const dateKeys = (list?.keys||[]).filter(k=>/:\d{4}-\d{2}-\d{2}$/.test(k));
+        for (const key of dateKeys) {
+          try {
+            const r = await storage.get(key);
+            if (r) days[key.replace("hyeongjin:","")] = JSON.parse(r.value);
+          } catch {}
+        }
+      } catch {}
+      try {
+        const r = await storage.get(`hyeongjin:memo:${todayStr}`);
+        if (r) setMemo(r.value);
+      } catch {}
+      try {
+        const rm = await storage.get(`hyeongjin:memo:${tomorrowStr}`);
+        if (rm) setTomorrowMemo(rm.value);
+        if (days[tomorrowStr]) setTomorrowChecked(days[tomorrowStr]);
+      } catch {}
+      if (days[todayStr]) setChecked(days[todayStr]);
+      setAllDays(days);
+      setLoaded(true);
+    })();
+  },[]);
+
+  const merged = useMemo(()=>({...allDays,[todayStr]:checked,[tomorrowStr]:tomorrowChecked}),[allDays,checked,tomorrowChecked,tomorrowStr]);
+
+  const stats = useMemo(()=>{
+    const {streak,todayFull} = calcStreak(merged);
+    const dots = [];
+    for (let i=6;i>=0;i--) {
+      const d = new Date(todayStr); d.setDate(d.getDate()-i);
+      const ds = d.toISOString().split("T")[0];
+      const data = merged[ds];
+      const t = getTasks(d);
+      const p = data ? Math.round((t.filter(x=>data[x.id]).length/t.length)*100) : 0;
+      dots.push({ds, pct:p, day:DAY_NAMES[d.getDay()], isToday:i===0});
+    }
+    let totalVocab=0,totalSj=0,totalAice=0,totalFull=0,monthFull=0;
+    const monthPrefix = `${todayDate.getFullYear()}-${String(todayDate.getMonth()+1).padStart(2,"0")}`;
+    for (const [ds,data] of Object.entries(merged)) {
+      if (!data) continue;
+      const d = new Date(ds); const t = getTasks(d);
+      const full = t.every(x=>data[x.id]);
+      if (full) totalFull++;
+      if (full && ds.startsWith(monthPrefix)) monthFull++;
+      if (data.vocab) totalVocab++;
+      if (data.sj_lec||data.sj_note||data.sj_quiz) totalSj++;
+      if (data.aice_lec||data.aice_code||data.aice_review) totalAice++;
+    }
+    const next = MILESTONES.filter(m=>daysUntil(m.date)>0).sort((a,b)=>a.date.localeCompare(b.date))[0];
+    return {streak, todayFull, dots, totalVocab:totalVocab*20, totalSj, totalAice, totalFull, monthFull, next};
+  },[merged]);
+
+  const toggle = async (id) => {
+    setSyncing(true);
+    if (viewOffset === 0) {
+      const next = {...checked,[id]:!checked[id]};
+      setChecked(next);
+      try { await storage.set(`hyeongjin:${todayStr}`,JSON.stringify(next)); } catch {}
+    } else {
+      const next = {...tomorrowChecked,[id]:!tomorrowChecked[id]};
+      setTomorrowChecked(next);
+      try { await storage.set(`hyeongjin:${tomorrowStr}`,JSON.stringify(next)); } catch {}
+    }
+    setSyncing(false);
+  };
+
+  const saveMemo = (val) => {
+    if (viewOffset === 0) setMemo(val);
+    else setTomorrowMemo(val);
+    clearTimeout(memoTimer.current);
+    memoTimer.current = setTimeout(async()=>{
+      try { await storage.set(`hyeongjin:memo:${viewDateStr}`,val); } catch {}
+    },800);
+  };
+
+  const prevMonth = ()=>calMonth===0?(setCalMonth(11),setCalYear(y=>y-1)):setCalMonth(m=>m-1);
+  const nextMonth = ()=>calMonth===11?(setCalMonth(0),setCalYear(y=>y+1)):setCalMonth(m=>m+1);
+
+  const card   = (bc,bg)=>({ background:bg||C.surface, border:`1px solid ${bc||C.border}`, borderRadius:12, padding:"14px 16px", marginBottom:12 });
+  const tabBtn = (a)=>({ flex:1, padding:"10px 0", background:"transparent", border:"none", cursor:"pointer", fontSize:13, fontWeight:a?700:400, color:a?C.blue:C.muted, borderBottom:a?`2px solid ${C.blue}`:"2px solid transparent", transition:"all 0.2s" });
+  const chkBox = (c,acc)=>({ width:22, height:22, borderRadius:6, flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center", cursor:"pointer", transition:"all 0.15s", border:`2px solid ${c?acc:C.border}`, background:c?acc:"transparent" });
+
+  if (!loaded) return <LoadingScreen label="데이터 불러오는 중…" />;
+
+  return (
+    <div style={{fontFamily:"'Noto Sans KR','Apple SD Gothic Neo',sans-serif",background:C.bg,minHeight:"100vh",color:C.text}}>
+
+      {/* HEADER */}
+      <div style={{background:C.surface,borderBottom:`1px solid ${C.border}`,padding:"18px 18px 0"}}>
+        <div style={{maxWidth:480,margin:"0 auto"}}>
+
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
+            <div>
+              <p style={{margin:0,fontSize:11,color:C.muted}}>
+                {todayDate.toLocaleDateString("ko-KR",{year:"numeric",month:"long",day:"numeric",weekday:"long"})}
+              </p>
+              <h1 style={{margin:"3px 0 0",fontSize:20,fontWeight:800,letterSpacing:"-0.5px"}}>형진의 자격증 플래너</h1>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:6}}>
+              {stats.streak>0 && (
+                <div style={{background:"#1C0A00",border:"1px solid #92400E55",borderRadius:20,padding:"4px 12px",fontSize:13,color:C.amber,fontWeight:700}}>
+                  🔥 {stats.streak}일 연속{!stats.todayFull?" (어제 기준)":""}
+                </div>
+              )}
+              {stats.next && (
+                <div style={{background:"#0D1B2A",border:`1px solid ${stats.next.color}33`,borderRadius:20,padding:"4px 12px",fontSize:11,color:stats.next.color,fontWeight:600}}>
+                  {stats.next.short} D-{daysUntil(stats.next.date)}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div style={{marginBottom:14}}>
+            <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
+              <span style={{fontSize:12,color:C.muted}}>
+                오늘 달성률
+                {syncing && <span style={{marginLeft:6,color:C.blue,fontSize:11}}>↑ 저장 중</span>}
+              </span>
+              <span style={{fontSize:12,fontWeight:700,color:done===tasks.length?C.green:C.blue}}>
+                {done}/{tasks.length}{done===tasks.length?" 🎉 완료!":""}
+              </span>
+            </div>
+            <div style={{background:C.border,borderRadius:999,height:5,overflow:"hidden"}}>
+              <div style={{height:"100%",width:`${todayPct}%`,borderRadius:999,transition:"width 0.4s ease",background:done===tasks.length?C.green:"linear-gradient(90deg,#58A6FF,#79C0FF)"}}/>
+            </div>
+          </div>
+
+          <div style={{display:"flex"}}>
+            {[["today","오늘"],["calendar","캘린더"],["dday","D-day"],["stats","통계"]].map(([k,l])=>(
+              <button key={k} style={tabBtn(tab===k)} onClick={()=>setTab(k)}>{l}</button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* BODY */}
+      <div style={{maxWidth:480,margin:"0 auto",padding:"18px 16px 80px"}}>
+
+        {/* 오늘 탭 */}
+        {tab==="today" && (
+          <>
+            <div style={{display:"flex",gap:8,marginBottom:14}}>
+              {[0,1].map(offset=>{
+                const isActive = viewOffset===offset;
+                const label    = offset===0 ? "오늘" : "내일 미리 하기";
+                const d        = offset===0 ? todayDate : tomorrowDate;
+                const t        = getTasks(d);
+                const c        = offset===0 ? checked : tomorrowChecked;
+                const cnt      = t.filter(x=>c[x.id]).length;
+                const full     = cnt===t.length;
+                return (
+                  <button key={offset} onClick={()=>setViewOffset(offset)} style={{
+                    flex:offset===0?"0 0 auto":1, padding:"10px 16px", borderRadius:10,
+                    cursor:"pointer", border:"none", fontFamily:"inherit", fontSize:13,
+                    fontWeight:isActive?700:500,
+                    background:isActive?(offset===1?"#1A1A0A":"#1C2433"):"#161B22",
+                    color:isActive?(offset===1?C.amber:C.blue):C.muted,
+                    outline:isActive?`2px solid ${offset===1?C.amber:C.blue}`:`1px solid ${C.border}`,
+                    transition:"all 0.2s", display:"flex", alignItems:"center", gap:8,
+                  }}>
+                    {offset===1 && <span style={{fontSize:14}}>⏩</span>}
+                    {label}
+                    {cnt>0 && (
+                      <span style={{marginLeft:"auto",background:full?C.green:C.border,color:full?"#0D1117":C.muted,borderRadius:999,padding:"1px 7px",fontSize:11,fontWeight:700}}>
+                        {full?"완료":`${cnt}/${t.length}`}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+
+            {viewOffset===1 && (
+              <div style={{...card(C.amber+"44","#120F00"),marginBottom:14}}>
+                <p style={{margin:0,fontSize:13,color:C.amber,fontWeight:700}}>
+                  ⏩ {tomorrowDate.toLocaleDateString("ko-KR",{month:"long",day:"numeric",weekday:"short"})} 분량 미리 하는 중
+                </p>
+                <p style={{margin:"4px 0 0",fontSize:12,color:C.muted}}>체크한 항목은 저장되고, 내일 앱을 열면 반영돼 있어요</p>
+              </div>
+            )}
+
+            <div style={card()}>
+              <div style={{marginBottom:12}}>
+                <span style={{fontSize:11,color:C.muted}}>{isWeekend?"🌅 주말 루틴":"📅 평일 루틴"} · <span style={{color:viewOffset===1?C.amber:C.blue,fontWeight:700}}>{phase.label}</span></span>
+                <p style={{margin:"3px 0 0",fontSize:13,color:C.sub}}>{phase.desc}</p>
+              </div>
+              <div style={{display:"flex",gap:4,justifyContent:"space-between"}}>
+                {stats.dots.map(dot=>(
+                  <div key={dot.ds} style={{textAlign:"center",flex:1,minWidth:0}}>
+                    <div style={{fontSize:10,color:dot.isToday?C.blue:C.muted,marginBottom:4,fontWeight:dot.isToday?700:400}}>{dot.day}</div>
+                    <div style={{height:28,borderRadius:6,background:dot.pct===0?C.border:dot.pct===100?C.green:`rgba(88,166,255,${0.15+dot.pct/100*0.85})`,border:dot.isToday?`2px solid ${C.blue}`:`2px solid transparent`,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                      {dot.pct===100&&<span style={{fontSize:11}}>✓</span>}
+                    </div>
+                    <div style={{fontSize:9,color:C.muted,marginTop:3,height:12}}>{dot.pct>0&&dot.pct<100?`${dot.pct}%`:""}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {Object.entries(CAT_META).map(([cat,meta])=>{
+              const list = tasks.filter(t=>t.cat===cat);
+              if (!list.length) return null;
+              return (
+                <div key={cat} style={{marginBottom:16}}>
+                  <div style={{display:"flex",alignItems:"center",marginBottom:8}}>
+                    <span style={{fontSize:11,fontWeight:700,color:meta.accent,letterSpacing:"0.1em",textTransform:"uppercase"}}>{meta.label}</span>
+                    <div style={{height:1,background:C.border,flex:1,marginLeft:8}}/>
+                  </div>
+                  {list.map(t=>(
+                    <div key={t.id} style={{...card(viewChecked[t.id]?meta.accent+"44":undefined),marginBottom:8,cursor:"pointer"}} onClick={()=>toggle(t.id)}>
+                      <div style={{display:"flex",alignItems:"center",gap:12}}>
+                        <div style={chkBox(!!viewChecked[t.id],meta.accent)}>
+                          {viewChecked[t.id]&&<span style={{fontSize:12,color:"#0D1117",fontWeight:700}}>✓</span>}
+                        </div>
+                        <span style={{fontSize:14,color:viewChecked[t.id]?C.muted:C.text,textDecoration:viewChecked[t.id]?"line-through":"none"}}>{t.label}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
+
+            {done===tasks.length && (
+              <div style={{textAlign:"center",padding:"16px 0 8px"}}>
+                <p style={{margin:0,color:C.green,fontWeight:700,fontSize:15}}>🎉 오늘 최소 분량 완료!</p>
+                <p style={{margin:"4px 0 0",color:C.muted,fontSize:13}}>시간이 남는다면 내일 분량을 당겨도 좋아요</p>
+              </div>
+            )}
+
+            <div style={{marginTop:8}}>
+              <div style={{display:"flex",alignItems:"center",marginBottom:8}}>
+                <span style={{fontSize:11,fontWeight:700,color:C.muted,letterSpacing:"0.1em"}}>📝 오늘의 메모</span>
+                <div style={{height:1,background:C.border,flex:1,marginLeft:8}}/>
+              </div>
+              <textarea value={viewMemoVal} onChange={e=>saveMemo(e.target.value)}
+                placeholder="진도, 어려웠던 것, 내일 할 일 등 자유롭게 기록해요…"
+                style={{width:"100%",minHeight:88,background:C.surface,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px",color:C.sub,fontSize:13,resize:"vertical",outline:"none",boxSizing:"border-box",fontFamily:"inherit",lineHeight:1.7}}/>
+            </div>
+          </>
+        )}
+
+        {/* 캘린더 탭 */}
+        {tab==="calendar" && (
+          <>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+              <button onClick={prevMonth} style={{background:C.border,border:"none",color:C.text,borderRadius:8,width:36,height:36,cursor:"pointer",fontSize:18}}>‹</button>
+              <span style={{fontWeight:700,fontSize:16}}>{calYear}년 {calMonth+1}월</span>
+              <button onClick={nextMonth} style={{background:C.border,border:"none",color:C.text,borderRadius:8,width:36,height:36,cursor:"pointer",fontSize:18}}>›</button>
+            </div>
+
+            {PHASES[calMonth+1] && (
+              <div style={card()}>
+                <span style={{color:C.blue,fontWeight:700,fontSize:13}}>{calMonth+1}월 — {PHASES[calMonth+1].label}</span>
+                <p style={{margin:"4px 0 0",color:C.muted,fontSize:12}}>{PHASES[calMonth+1].desc}</p>
+              </div>
+            )}
+
+            <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:12,overflow:"hidden",marginBottom:14}}>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)"}}>
+                {DAY_NAMES.map((d,i)=>(
+                  <div key={d} style={{textAlign:"center",padding:"9px 0",fontSize:12,fontWeight:600,color:i===0?"#F87171":i===6?C.blue:C.muted,background:C.border}}>{d}</div>
+                ))}
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)"}}>
+                {Array.from({length:getFirst(calYear,calMonth)}).map((_,i)=>(
+                  <div key={`e${i}`} style={{minHeight:46,borderTop:`1px solid ${C.border}`}}/>
+                ))}
+                {Array.from({length:getDIM(calYear,calMonth)}).map((_,i)=>{
+                  const d = i+1, ds = padDate(calYear,calMonth,d);
+                  const isT = ds===todayStr, dow = new Date(calYear,calMonth,d).getDay();
+                  const ms = MILESTONES.filter(m=>m.date===ds);
+                  const data = merged[ds], dt = getTasks(new Date(calYear,calMonth,d));
+                  const full = data && dt.every(t=>data[t.id]);
+                  return (
+                    <div key={d} style={{minHeight:46,borderTop:`1px solid ${C.border}`,background:isT?"#1C2433":"transparent",padding:"5px 3px"}}>
+                      <div style={{width:24,height:24,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto",fontSize:13,fontWeight:isT?700:400,background:isT?C.blue:full?"#0A2A18":"transparent",color:isT?"#0D1117":full?C.green:dow===0?"#F87171":dow===6?C.blue:C.text}}>{d}</div>
+                      {ms.map(m=>(
+                        <div key={m.date} style={{fontSize:9,borderRadius:3,padding:"1px 3px",marginTop:2,textAlign:"center",background:m.color+"22",color:m.color,overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis",lineHeight:1.4}}>{m.short}</div>
+                      ))}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {MILESTONES.filter(m=>{const md=new Date(m.date);return md.getMonth()===calMonth&&md.getFullYear()===calYear;}).map(m=>(
+              <div key={m.date} style={{...card(),borderLeft:`3px solid ${m.color}`,paddingLeft:14,marginBottom:8}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <span style={{fontSize:14,fontWeight:600}}>{m.label}</span>
+                  <span style={{fontSize:12,color:C.muted}}>{fmtDate(m.date)}</span>
+                </div>
+              </div>
+            ))}
+
+            <div style={{display:"flex",gap:12,marginTop:8,justifyContent:"center"}}>
+              {[["#0A2A18",C.green,"완전 달성"],[C.blue,C.blue,"오늘"],[C.border,C.muted,"미달성"]].map(([bg,c,l])=>(
+                <div key={l} style={{display:"flex",alignItems:"center",gap:5}}>
+                  <div style={{width:12,height:12,borderRadius:3,background:bg,border:`1px solid ${c}44`}}/>
+                  <span style={{fontSize:11,color:C.muted}}>{l}</span>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+
+        {/* D-day 탭 */}
+        {tab==="dday" && (
+          <>
+            <p style={{color:C.muted,fontSize:13,marginBottom:14}}>시험까지 남은 날 · 오늘 기준</p>
+            {MILESTONES.map(m=>{
+              const d = daysUntil(m.date), past = d<0;
+              const start = new Date("2026-06-01").getTime();
+              const end = new Date(m.date).getTime();
+              const nowT = new Date(todayStr).getTime();
+              const bar = past?100:Math.max(0,Math.min(100,((nowT-start)/(end-start))*100));
+              return (
+                <div key={m.date} style={{...card(past?C.border:m.color+"33"),marginBottom:12,opacity:past?0.45:1}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:past?0:10}}>
+                    <div>
+                      <p style={{margin:0,fontSize:15,fontWeight:700}}>{m.label}</p>
+                      <p style={{margin:"3px 0 0",fontSize:12,color:C.muted}}>{fmtDate(m.date)}</p>
+                    </div>
+                    <span style={{fontSize:30,fontWeight:800,color:past?C.muted:m.color,lineHeight:1}}>{past?"완료":`D-${d}`}</span>
+                  </div>
+                  {!past&&(
+                    <div style={{background:C.border,borderRadius:999,height:4,overflow:"hidden"}}>
+                      <div style={{height:"100%",width:`${bar}%`,background:m.color,borderRadius:999}}/>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            <div style={card()}>
+              <p style={{margin:0,fontSize:12,color:C.muted,lineHeight:1.9}}>
+                ⚠️ <strong style={{color:C.text}}>날짜 주의</strong><br/>
+                AICE·토익은 직접 원서접수 후 날짜 확정 필요<br/>
+                📌 <strong style={{color:C.amber}}>7월 20일 — 사조분 원서접수 시작!</strong><br/>
+                큐넷(q-net.or.kr)에서 접수하세요.
+              </p>
+            </div>
+          </>
+        )}
+
+        {/* 통계 탭 */}
+        {tab==="stats" && (
+          <>
+            <div style={{...card(stats.streak>0?"#92400E55":C.border,"#0F0800"),marginBottom:12}}>
+              <div style={{display:"flex",alignItems:"center",gap:14}}>
+                <span style={{fontSize:40,lineHeight:1}}>🔥</span>
+                <div>
+                  <p style={{margin:0,fontSize:11,color:"#92400E"}}>연속 달성 스트릭</p>
+                  <p style={{margin:"2px 0 0",fontSize:34,fontWeight:800,color:C.amber,lineHeight:1}}>{stats.streak}일</p>
+                  <p style={{margin:"3px 0 0",fontSize:11,color:C.muted}}>
+                    {stats.streak===0?"오늘 완료하면 스트릭 시작!":stats.todayFull?"오늘 포함":stats.streak+"일 연속 (어제까지 기준)"}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div style={{...card(),display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div>
+                <p style={{margin:0,fontSize:12,color:C.muted}}>{todayDate.getMonth()+1}월 완전 달성일</p>
+                <p style={{margin:"3px 0 0",fontSize:11,color:C.muted}}>모든 항목 체크 완료한 날</p>
+              </div>
+              <span style={{fontSize:36,fontWeight:800,color:C.blue}}>{stats.monthFull}<span style={{fontSize:14,color:C.muted}}>일</span></span>
+            </div>
+
+            <div style={{marginBottom:8}}>
+              <div style={{display:"flex",alignItems:"center",marginBottom:10}}>
+                <span style={{fontSize:11,fontWeight:700,color:C.muted,letterSpacing:"0.1em"}}>누적 기록</span>
+                <div style={{height:1,background:C.border,flex:1,marginLeft:8}}/>
+              </div>
+              {[
+                {icon:"📘",label:"토익 단어 누적 암기",value:`${stats.totalVocab.toLocaleString()}개`,color:CAT_META.toeic.accent,sub:"단어 암기 완료일 × 20개"},
+                {icon:"📗",label:"사조분 공부한 날",value:`${stats.totalSj}일`,color:CAT_META.sajobn.accent,sub:"유선배 강의 또는 기출 완료"},
+                {icon:"📙",label:"AICE 공부한 날",value:`${stats.totalAice}일`,color:CAT_META.aice.accent,sub:"강의 수강 또는 실습 완료"},
+                {icon:"⭐",label:"전체 완전 달성일",value:`${stats.totalFull}일`,color:"#F9A8D4",sub:"모든 항목 체크 완료"},
+              ].map(item=>(
+                <div key={item.label} style={{...card(),display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                  <div style={{display:"flex",alignItems:"center",gap:10}}>
+                    <span style={{fontSize:22,lineHeight:1}}>{item.icon}</span>
+                    <div>
+                      <p style={{margin:0,fontSize:13,color:C.sub}}>{item.label}</p>
+                      <p style={{margin:"2px 0 0",fontSize:11,color:C.muted}}>{item.sub}</p>
+                    </div>
+                  </div>
+                  <span style={{fontSize:24,fontWeight:800,color:item.color,flexShrink:0}}>{item.value}</span>
+                </div>
+              ))}
+            </div>
+
+            <div style={card(C.blue+"33","#0D1B2A")}>
+              <p style={{margin:0,fontSize:13,color:C.text,lineHeight:1.8}}>
+                {stats.totalFull===0?"💪 오늘부터 시작해요! 매일 최소 분량만 지켜도 10월엔 완전히 달라집니다."
+                  :stats.totalFull<7?`✨ ${stats.totalFull}일 해냈어요. 첫 7일이 가장 어렵습니다. 계속 해봐요.`
+                  :stats.totalFull<30?`🚀 벌써 ${stats.totalFull}일! 습관이 만들어지고 있어요. 이 페이스 유지하면 돼요.`
+                  :`🏆 ${stats.totalFull}일 달성! 이 페이스라면 10월 목표 충분히 가능합니다.`}
+              </p>
+            </div>
+
+            {/* 로그아웃 */}
+            <div style={{marginTop:24,textAlign:"center"}}>
+              <p style={{color:C.muted,fontSize:12,marginBottom:8}}>
+                {user.displayName || user.email} 로그인 중
+              </p>
+              <button onClick={()=>firebase.auth().signOut()} style={{
+                background:"transparent",border:`1px solid ${C.border}`,
+                color:C.muted,borderRadius:8,padding:"8px 20px",cursor:"pointer",
+                fontSize:12,fontFamily:"inherit",
+              }}>로그아웃</button>
+            </div>
+          </>
+        )}
+
+      </div>
+    </div>
+  );
+}
+
+/* ── ROOT ── */
+function App() {
+  const [authState, setAuthState] = useState("checking");
+  const [user, setUser] = useState(null);
+
+  useEffect(()=>{
+    if (!IS_CONFIGURED) return;
+    const unsub = firebase.auth().onAuthStateChanged(u => {
+      setUser(u);
+      setAuthState(u ? "ready" : "login");
+    });
+    return unsub;
+  },[]);
+
+  if (!IS_CONFIGURED)       return <SetupGuide />;
+  if (authState==="checking") return <LoadingScreen />;
+  if (authState==="login")    return <LoginScreen />;
+  return <StudyPlanner user={user} />;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
